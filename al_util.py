@@ -195,6 +195,10 @@ def update_C_a(C_a, V, Q, gamma=0.1):
 def al_test(W, X, train_ind, labels, evecs, evals, al_iters=20, method='vopt', classifier='mean', \
             kernel='heat', dt=.5, thresh=1e-9, show=False, return_ll=False, deg=None):
     labeled_ind = deepcopy(train_ind)
+    if return_ll:
+        print("return_ll will return poisson learning")
+        model = gl.ssl.poisson(W)
+#         model = gl.ssl.laplace(W)
     
     if kernel == 'heat':
         Sigma = evecs * np.exp(-dt*evals)[np.newaxis, :]
@@ -212,19 +216,22 @@ def al_test(W, X, train_ind, labels, evecs, evals, al_iters=20, method='vopt', c
     
     acc = np.array([])
     p_calc = p.copy()
-    p_calc[p_calc == 0.5] + 0.000001*np.random.randn((p_calc==0.5).sum())
-    acc = np.append(acc, gl.accuracy(1.*(p_calc >= 0.5), labels, labeled_ind.size))
+    p_calc[p_calc == 0.5] += 0.000001*np.random.randn((p_calc==0.5).sum())
+    acc = np.append(acc, gl.ssl.ssl_accuracy(1.*(p_calc >= 0.5), labels, labeled_ind.size))
     if return_ll:
         acc_ll = np.array([])
-        u_laplace = gl.graph_ssl(W, labeled_ind, labels[labeled_ind], algorithm='laplace')
-        acc_ll = np.append(acc_ll, gl.accuracy(u_laplace, labels, labeled_ind.size))
+        u_laplace = model.fit(labeled_ind, labels[labeled_ind])[:,1]
+        acc_ll = np.append(acc_ll, gl.ssl.ssl_accuracy(1.*(u_laplace >= 0.), labels, labeled_ind.size))
     
     
     for it in range(al_iters):
         candidate_ind = np.setdiff1d(np.arange(X.shape[0]), labeled_ind)
         obj_vals = beta_look_ahead_acquisition(alpha, beta, evecs, evals, candidate_ind, dt=dt, \
                                              classifier=classifier, method=method, deg=deg, c0_ind=c0_ind, c1_ind=c1_ind)
-        k = candidate_ind[np.argmax(obj_vals)]
+        
+        max_inds = np.where(np.isclose(obj_vals, np.max(obj_vals)))[0]
+        k = candidate_ind[np.random.choice(max_inds)]
+#         k = candidate_ind[np.argmax(obj_vals)]
         
         # add k's propagation based on oracle
         prop_k = Sigma @ evecs.T[:,k]
@@ -263,10 +270,10 @@ def al_test(W, X, train_ind, labels, evecs, evals, al_iters=20, method='vopt', c
         # calculate new accuracy -- add random coin toss for the 0.5 values
         p_calc = p.copy()
         p_calc[p_calc == 0.5] + 0.000001*np.random.randn((p_calc==0.5).sum())
-        acc = np.append(acc, gl.accuracy(1.*(p_calc >= 0.5), labels, labeled_ind.size))
+        acc = np.append(acc, gl.ssl.ssl_accuracy(1.*(p_calc >= 0.5), labels, labeled_ind.size))
         if return_ll:
-            u_laplace = gl.graph_ssl(W, labeled_ind, labels[labeled_ind], algorithm='laplace')
-            acc_ll = np.append(acc_ll, gl.accuracy(u_laplace, labels, labeled_ind.size))
+            u_laplace = model.fit(labeled_ind, labels[labeled_ind])[:,-1]
+            acc_ll = np.append(acc_ll, gl.ssl.ssl_accuracy(1.*(u_laplace >= 0), labels, labeled_ind.size))
     
     if return_ll:
         return acc, labeled_ind, acc_ll
@@ -276,18 +283,27 @@ def al_test(W, X, train_ind, labels, evecs, evals, al_iters=20, method='vopt', c
 def al_test_gl(W, X, train_ind, labels, evecs, evals, al_iters=20, method='vopt', algorithm='laplace', \
             show=False, gamma=0.1):
     labeled_ind = deepcopy(train_ind)
-    u = gl.graph_ssl(W, labeled_ind, labels[labeled_ind], algorithm=algorithm, return_vector=True)
     
+    if algorithm == 'laplace':
+        model = gl.ssl.laplace(W)
+        u = model.fit(labeled_ind, labels[labeled_ind])
+    elif algorithm == 'poisson':
+        model = gl.ssl.poisson(W)
+        u = model.fit(labeled_ind, labels[labeled_ind])
+        
+#     u = gl.graph_ssl(W, labeled_ind, labels[labeled_ind], algorithm=algorithm, return_vector=True)
+       
     acc = np.array([])
-    acc = np.append(acc, gl.accuracy(np.argmax(u, axis=1), labels, labeled_ind.size))
+    acc = np.append(acc,  gl.ssl.ssl_accuracy(np.argmax(u, axis=1), labels, labeled_ind.size))
     
-    C_a = np.linalg.inv(np.diag(evals) + evecs[train_ind,:].T @ evecs[train_ind,:] / gamma**2.) # M by M covariance matrix
+    C_a = np.linalg.inv(np.diag(evals) + evecs[labeled_ind,:].T @ evecs[labeled_ind,:] / gamma**2.) # M by M covariance matrix
 
     for it in range(al_iters):
         candidate_ind = np.setdiff1d(np.arange(X.shape[0]), labeled_ind)
         obj_vals = acquisition_function(C_a, evecs, candidate_ind, u, method=method, \
                                                 uncertainty_method='smallest_margin', gamma=gamma)
-        k = candidate_ind[np.argmax(obj_vals)]
+        max_inds = np.where(np.isclose(obj_vals, np.max(obj_vals)))[0]
+        k = candidate_ind[np.random.choice(max_inds)]
             
         if show:
             fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10,4))
@@ -302,12 +318,12 @@ def al_test_gl(W, X, train_ind, labels, evecs, evals, al_iters=20, method='vopt'
             
         # update classifier
         labeled_ind = np.append(labeled_ind, k)
-        u = gl.graph_ssl(W, labeled_ind, labels[labeled_ind], algorithm=algorithm, return_vector=True)
+        u = model.fit(labeled_ind, labels[labeled_ind])
         
         C_a = update_C_a(C_a, evecs, [k], gamma=gamma)
         
         # calculate new accuracy
-        acc = np.append(acc, gl.accuracy(np.argmax(u, axis=1), labels, labeled_ind.size))
+        acc = np.append(acc, gl.ssl.ssl_accuracy(np.argmax(u, axis=1), labels, labeled_ind.size))
     
     return acc, labeled_ind
 
